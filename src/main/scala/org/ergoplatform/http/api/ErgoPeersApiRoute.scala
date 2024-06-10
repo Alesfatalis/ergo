@@ -1,6 +1,6 @@
 package org.ergoplatform.http.api
 
-import java.net.{InetAddress, InetSocketAddress, URL}
+import java.net.{InetAddress, InetSocketAddress}
 import akka.actor.{ActorRef, ActorRefFactory}
 import akka.http.scaladsl.server.Route
 import akka.util.Timeout
@@ -8,12 +8,12 @@ import io.circe.syntax._
 import io.circe.{Encoder, Json}
 import io.circe.generic.semiauto.deriveEncoder
 import org.ergoplatform.network.ErgoSyncTracker
-import scorex.core.api.http.{ApiError, ApiResponse, ApiRoute}
+import scorex.core.api.http.{ApiResponse, ApiRoute}
 import scorex.core.network.{ConnectedPeer, DeliveryTracker}
 import scorex.core.network.NetworkController.ReceivableMessages.{ConnectTo, GetConnectedPeers, GetPeersStatus}
-import scorex.core.network.peer.{PeerInfo, PeersStatus}
-import scorex.core.network.peer.PeerManager.ReceivableMessages.{GetAllPeers, GetBlacklistedPeers}
-import scorex.core.settings.RESTApiSettings
+import org.ergoplatform.network.peer.{PeerInfo, PeersStatus}
+import org.ergoplatform.network.peer.PeerManager.ReceivableMessages.{GetAllPeers, GetBlacklistedPeers}
+import org.ergoplatform.settings.RESTApiSettings
 
 import scala.concurrent.duration._
 import scala.concurrent.ExecutionContext
@@ -44,7 +44,7 @@ class ErgoPeersApiRoute(peerManager: ActorRef,
   def allPeers: Route = (path("all") & get) {
     val result = askActor[Map[InetSocketAddress, PeerInfo]](peerManager, GetAllPeers).map {
       _.map { case (address, peerInfo) =>
-        PeerInfoResponse.fromAddressAndInfo(address, settings.publicUrl, peerInfo)
+        PeerInfoResponse.fromAddressAndInfo(address, peerInfo)
       }
     }
     ApiResponse(result)
@@ -56,7 +56,7 @@ class ErgoPeersApiRoute(peerManager: ActorRef,
         con.peerInfo.map { peerInfo =>
           PeerInfoResponse(
             address = peerInfo.peerSpec.declaredAddress.map(_.toString).getOrElse(""),
-            lastMessage = con.lastMessage,
+            lastMessage = peerInfo.lastStoredActivityTime,
             lastHandshake = peerInfo.lastHandshake,
             name = peerInfo.peerSpec.nodeName,
             connectionType = peerInfo.connectionType.map(_.toString),
@@ -121,13 +121,13 @@ object ErgoPeersApiRoute {
                               restApiUrl: Option[String])
 
   object PeerInfoResponse {
-    def fromAddressAndInfo(address: InetSocketAddress, restApiUrl: Option[URL], peerInfo: PeerInfo): PeerInfoResponse = PeerInfoResponse(
+    def fromAddressAndInfo(address: InetSocketAddress, peerInfo: PeerInfo): PeerInfoResponse = PeerInfoResponse(
       address.toString,
       0,
       peerInfo.lastHandshake,
       peerInfo.peerSpec.nodeName,
       peerInfo.connectionType.map(_.toString),
-      restApiUrl.map(_.toString)
+      peerInfo.peerSpec.publicUrlOpt.map(_.toString)
     )
 
     @SuppressWarnings(Array("org.wartremover.warts.PublicInference"))

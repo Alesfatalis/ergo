@@ -1,14 +1,14 @@
 package org.ergoplatform.wallet.secrets
 
-import org.ergoplatform.wallet.utils.Generators
+import org.ergoplatform.sdk.wallet.secrets.ExtendedSecretKey
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 
 class ExtendedPublicKeySpec
   extends ExtendedSecretKeySpec
-    with ScalaCheckPropertyChecks
-    with Generators {
+    with ScalaCheckPropertyChecks {
+  import org.ergoplatform.wallet.utils.WalletGenerators._
 
-  val rootSecret: ExtendedSecretKey = ExtendedSecretKey.deriveMasterKey(seed)
+  val rootSecret: ExtendedSecretKey = ExtendedSecretKey.deriveMasterKey(seed, usePre1627KeyDerivation = false)
 
   property("public key tree derivation from seed (test vectors from BIP32 check)") {
     val expectedRoot = "kTV6HY41wXZVSqdpoe1heA8pBZFEN2oq5T59ZCMpqKKJ"

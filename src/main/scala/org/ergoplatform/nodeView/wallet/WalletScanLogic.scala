@@ -11,6 +11,8 @@ import org.ergoplatform.wallet.boxes.TrackedBox
 import scorex.util.{ModifierId, ScorexLogging}
 import scorex.util.bytesToId
 
+import scala.collection.compat.immutable.ArraySeq
+import scala.collection.immutable.TreeSet
 import scala.collection.mutable
 import scala.util.Try
 
@@ -44,11 +46,11 @@ object WalletScanLogic extends ScorexLogging {
                             walletVars: WalletVars,
                             block: ErgoFullBlock,
                             cachedOutputsFilter: Option[BloomFilter[Array[Byte]]],
-                            dustLimit: Option[Long]
-                           ): Try[(WalletRegistry, OffChainRegistry, BloomFilter[Array[Byte]])] = {
+                            dustLimit: Option[Long],
+                            walletProfile: WalletProfile): Try[(WalletRegistry, OffChainRegistry, BloomFilter[Array[Byte]])] = {
     scanBlockTransactions(
       registry, offChainRegistry, walletVars,
-      block.height, block.id, block.transactions, cachedOutputsFilter, dustLimit)
+      block.height, block.id, block.transactions, cachedOutputsFilter, dustLimit, walletProfile)
   }
 
   /**
@@ -70,15 +72,13 @@ object WalletScanLogic extends ScorexLogging {
                             blockId: ModifierId,
                             transactions: Seq[ErgoTransaction],
                             cachedOutputsFilter: Option[BloomFilter[Array[Byte]]],
-                            dustLimit: Option[Long]
-                           ): Try[(WalletRegistry, OffChainRegistry, BloomFilter[Array[Byte]])] = {
+                            dustLimit: Option[Long],
+                            walletProfile: WalletProfile): Try[(WalletRegistry, OffChainRegistry, BloomFilter[Array[Byte]])] = {
 
     // Take unspent wallet outputs Bloom Filter from cache
     // or recreate it from unspent outputs stored in the database
     val outputsFilter = cachedOutputsFilter.getOrElse {
-      // todo: currently here and other places hardcoded values are used for Bloom filter parameters
-      // todo: consider different profiles for the config, such as "user", "wallet", "app hub"
-      val bf = WalletCache.emptyFilter(expectedKeys = 20000)
+      val bf = WalletCache.emptyFilter(walletProfile.outputsFilterSize)
 
       registry.allUnspentBoxes().foreach { tb =>
         bf.put(tb.box.id)
@@ -96,7 +96,7 @@ object WalletScanLogic extends ScorexLogging {
       tb.copy(scans = Set(PaymentsScanId))
     }
 
-    val initialScanResults = ScanResults(resolvedBoxes, Seq.empty, Seq.empty)
+    val initialScanResults = ScanResults(resolvedBoxes, ArraySeq.empty, ArraySeq.empty)
 
     // Wallet unspent outputs, we fetch them only when Bloom filter shows that some outputs may be spent
     val unspentBoxes = mutable.Map[ModifierId, TrackedBox]()
@@ -170,7 +170,7 @@ object WalletScanLogic extends ScorexLogging {
         //data needed to update the offchain-registry
         val walletUnspent = registry.walletUnspentBoxes()
         val newOnChainIds = scanRes.outputs.map(x => encodedBoxId(x.box.id))
-        val updatedOffchainRegistry = offChainRegistry.updateOnBlock(height, walletUnspent, newOnChainIds)
+        val updatedOffchainRegistry = offChainRegistry.updateOnBlock(height, walletUnspent, newOnChainIds.to[TreeSet])
 
         (registry, updatedOffchainRegistry, outputsFilter)
       }
@@ -200,7 +200,7 @@ object WalletScanLogic extends ScorexLogging {
       val boxScript = bx.propositionBytes
 
       // then check whether Bloom filter built on top of payment & mining scripts of the p2pk-wallet
-      val statuses: Set[ScanId] = if (walletVars.filter.mightContain(boxScript)) {
+      val statuses: Set[ScanId] = if (walletVars.scriptsFilter.mightContain(boxScript)) {
 
         // first, we are checking mining script
         val miningIncomeTriggered = miningScriptsBytes.exists(ms => boxScript.sameElements(ms))

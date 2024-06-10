@@ -1,25 +1,27 @@
 package org.ergoplatform.utils.generators
 
 import org.ergoplatform.Input
-import org.ergoplatform.mining.difficulty.LinearDifficultyControl
+import org.ergoplatform.mining.difficulty.DifficultyAdjustment
 import org.ergoplatform.modifiers.history.HeaderChain
 import org.ergoplatform.modifiers.history.extension.{Extension, ExtensionCandidate}
 import org.ergoplatform.modifiers.history.header.Header
 import org.ergoplatform.modifiers.history.popow.{NipopowAlgos, PoPowHeader}
 import org.ergoplatform.modifiers.mempool.ErgoTransaction
-import org.ergoplatform.modifiers.{NonHeaderBlockSection, ErgoFullBlock, BlockSection}
+import org.ergoplatform.modifiers.{BlockSection, ErgoFullBlock, NonHeaderBlockSection}
 import org.ergoplatform.nodeView.history.ErgoHistory
 import org.ergoplatform.settings.Constants
-import org.ergoplatform.utils.{BoxUtils, ErgoTestConstants}
+import org.ergoplatform.utils.BoxUtils
 import scorex.crypto.authds.{ADKey, SerializedAdProof}
 import scorex.crypto.hash.Digest32
+import sigma.Colls
 import sigmastate.eval._
 import sigmastate.helpers.TestingHelpers._
 import sigmastate.interpreter.{ContextExtension, ProverResult}
 
 import scala.util.Random
 
-trait ChainGenerator extends ErgoTestConstants {
+object ChainGenerator {
+  import org.ergoplatform.utils.ErgoCoreTestConstants._
 
   private def emptyProofs = SerializedAdProof @@ scorex.utils.Random.randomBytes(Random.nextInt(5000))
 
@@ -47,7 +49,7 @@ trait ChainGenerator extends ErgoTestConstants {
     */
   final def genHeaderChain(height: Int,
                            prefixOpt: Option[Header] = None,
-                           control: LinearDifficultyControl = defaultDifficultyControl,
+                           control: DifficultyAdjustment = defaultDifficultyControl,
                            extensionHash: Digest32 = EmptyDigest32,
                            diffBitsOpt: Option[Long],
                            useRealTs: Boolean): HeaderChain =
@@ -57,7 +59,7 @@ trait ChainGenerator extends ErgoTestConstants {
     */
   final def genHeaderChain(until: Seq[Header] => Boolean,
                            prefix: Option[Header],
-                           control: LinearDifficultyControl,
+                           control: DifficultyAdjustment,
                            diffBitsOpt: Option[Long],
                            useRealTs: Boolean): HeaderChain = {
     val headers = headerStream(prefix, control, diffBitsOpt = diffBitsOpt, useRealTs = useRealTs)
@@ -84,7 +86,7 @@ trait ChainGenerator extends ErgoTestConstants {
   }
 
   private def headerStream(prefix: Option[Header],
-                           control: LinearDifficultyControl,
+                           control: DifficultyAdjustment,
                            extensionHash: Digest32 = EmptyDigest32,
                            diffBitsOpt: Option[Long],
                            useRealTs: Boolean): Stream[Header] = {
@@ -95,7 +97,7 @@ trait ChainGenerator extends ErgoTestConstants {
   }
 
   def nextHeader(prev: Option[Header],
-                 control: LinearDifficultyControl,
+                 control: DifficultyAdjustment,
                  extensionHash: Digest32 = EmptyDigest32,
                  tsOpt: Option[Long] = None,
                  diffBitsOpt: Option[Long] = None,
@@ -103,12 +105,12 @@ trait ChainGenerator extends ErgoTestConstants {
     powScheme.prove(
       prev,
       Header.InitialVersion,
-      diffBitsOpt.getOrElse(settings.chainSettings.initialNBits),
+      diffBitsOpt.getOrElse(chainSettings.initialNBits),
       EmptyStateRoot,
       EmptyDigest32,
       EmptyDigest32,
       tsOpt.getOrElse(prev.map(_.timestamp + control.desiredInterval.toMillis)
-        .getOrElse(if (useRealTs) timeProvider.time() else 0)),
+        .getOrElse(if (useRealTs) System.currentTimeMillis() else 0)),
       extensionHash,
       Array.fill(3)(0: Byte),
       defaultMinerSecretNumber
@@ -123,15 +125,15 @@ trait ChainGenerator extends ErgoTestConstants {
   def genChain(height: Int,
                history: ErgoHistory,
                blockVersion: Header.Version = Header.InitialVersion,
-               nBits: Long = settings.chainSettings.initialNBits,
+               nBits: Long = chainSettings.initialNBits,
                extension: ExtensionCandidate = defaultExtension): Seq[ErgoFullBlock] = {
     val prefix = history.bestFullBlockOpt
     blockStream(prefix, blockVersion, nBits, extension).take(height + prefix.size)
   }
 
-  protected def blockStream(prefix: Option[ErgoFullBlock],
+  def blockStream(prefix: Option[ErgoFullBlock],
                             blockVersion: Header.Version = Header.InitialVersion,
-                            nBits: Long = settings.chainSettings.initialNBits,
+                            nBits: Long = chainSettings.initialNBits,
                             extension: ExtensionCandidate = defaultExtension): Stream[ErgoFullBlock] = {
     val proof = ProverResult(Array(0x7c.toByte), ContextExtension.empty)
     val inputs = IndexedSeq(Input(ADKey @@ Array.fill(32)(0: Byte), proof))
@@ -152,7 +154,7 @@ trait ChainGenerator extends ErgoTestConstants {
                 txs: Seq[ErgoTransaction],
                 extension: ExtensionCandidate,
                 blockVersion: Header.Version = Header.InitialVersion,
-                nBits: Long = settings.chainSettings.initialNBits): ErgoFullBlock = {
+                nBits: Long = chainSettings.initialNBits): ErgoFullBlock = {
     val interlinks = prev.toSeq.flatMap(x =>
       nipopowAlgos.updateInterlinks(x.header, NipopowAlgos.unpackInterlinks(x.extension.fields).get))
     val validExtension = extension ++ nipopowAlgos.interlinksToExtension(interlinks)
@@ -163,7 +165,7 @@ trait ChainGenerator extends ErgoTestConstants {
       EmptyStateRoot,
       emptyProofs,
       txs,
-      Math.max(timeProvider.time(), prev.map(_.header.timestamp + 1).getOrElse(timeProvider.time())),
+      Math.max(System.currentTimeMillis(), prev.map(_.header.timestamp + 1).getOrElse(System.currentTimeMillis())),
       validExtension,
       Array.fill(3)(0: Byte),
       defaultMinerSecretNumber

@@ -3,7 +3,7 @@ package org.ergoplatform.tools
 import com.google.common.primitives.Bytes
 import org.bouncycastle.util.BigIntegers
 import org.ergoplatform.mining._
-import org.ergoplatform.mining.difficulty.RequiredDifficulty
+import org.ergoplatform.mining.difficulty.DifficultySerializer
 import org.ergoplatform.modifiers.history.extension.ExtensionCandidate
 import org.ergoplatform.modifiers.history.header.Header
 import org.ergoplatform.utils.ErgoTestHelpers
@@ -12,6 +12,8 @@ import scorex.crypto.hash.{Blake2b256, Blake2b512, CryptographicHash, Digest}
 import scala.annotation.tailrec
 
 object MinerBench extends App with ErgoTestHelpers {
+  import org.ergoplatform.utils.ErgoCoreTestConstants._
+  import org.ergoplatform.utils.generators.ErgoCoreTransactionGenerators._
 
   validationBench()
   //  numericHashBench()
@@ -65,7 +67,7 @@ object MinerBench extends App with ErgoTestHelpers {
     val difficulty = 1000
     val fb = invalidErgoFullBlockGen.sample.get
     val inHeader = fb.header
-    val nBits = RequiredDifficulty.encodeCompactBits(difficulty)
+    val nBits = DifficultySerializer.encodeCompactBits(difficulty)
     val h = inHeader.copy(nBits = nBits)
 
     val candidate = new CandidateBlock(None, Header.InitialVersion, nBits: Long, h.stateRoot,

@@ -2,14 +2,16 @@ package org.ergoplatform.local
 
 import org.ergoplatform.modifiers.history.popow.{PoPowHeader, PoPowParams}
 import org.ergoplatform.modifiers.ErgoFullBlock
-import org.ergoplatform.utils.generators.{ChainGenerator, ErgoGenerators}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.propspec.AnyPropSpec
 
 
-class NipopowVerifierSpec extends AnyPropSpec with Matchers with ChainGenerator with ErgoGenerators {
+class NipopowVerifierSpec extends AnyPropSpec with Matchers {
+  import org.ergoplatform.utils.ErgoCoreTestConstants._
+  import org.ergoplatform.utils.generators.ChainGenerator._
 
-  private val poPowParams = PoPowParams(30, 30)
+
+  private val poPowParams = PoPowParams(30, 30, continuous = false)
   val toPoPoWChain = (c: Seq[ErgoFullBlock]) => c.map(b => PoPowHeader.fromBlock(b).get)
 
   property("processes new proofs") {
@@ -25,7 +27,7 @@ class NipopowVerifierSpec extends AnyPropSpec with Matchers with ChainGenerator 
       val longProof = nipopowAlgos.prove(longChain)(poPowParams).get
       val longestProof = nipopowAlgos.prove(longestChain)(poPowParams).get
 
-      val verifier = new NipopowVerifier(baseChain.head.id)
+      val verifier = new NipopowVerifier(Some(baseChain.head.id))
       verifier.bestChain.length shouldBe 0
 
       verifier.process(shortProof)

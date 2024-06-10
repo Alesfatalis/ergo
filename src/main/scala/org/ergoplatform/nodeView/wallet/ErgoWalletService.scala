@@ -6,25 +6,28 @@ import org.ergoplatform._
 import org.ergoplatform.modifiers.ErgoFullBlock
 import org.ergoplatform.modifiers.mempool.{ErgoTransaction, UnsignedErgoTransaction}
 import org.ergoplatform.nodeView.state.{ErgoStateContext, UtxoStateReader}
-import org.ergoplatform.nodeView.wallet.ErgoWalletService.DeriveNextKeyResult
+import org.ergoplatform.nodeView.wallet.ErgoWalletServiceUtils.DeriveNextKeyResult
 import org.ergoplatform.nodeView.wallet.models.{ChangeBox, CollectedBoxes}
 import org.ergoplatform.nodeView.wallet.persistence.{WalletRegistry, WalletStorage}
 import org.ergoplatform.nodeView.wallet.requests.{ExternalSecret, TransactionGenerationRequest}
 import org.ergoplatform.nodeView.wallet.scanning.{Scan, ScanRequest}
+import org.ergoplatform.sdk.wallet.secrets.DerivationPath
 import org.ergoplatform.settings.{ErgoSettings, Parameters}
 import org.ergoplatform.wallet.Constants.ScanId
-import org.ergoplatform.wallet.boxes.{BoxSelector, ErgoBoxSerializer}
+import org.ergoplatform.wallet.boxes.{BoxSelector, TrackedBox}
 import org.ergoplatform.wallet.interface4j.SecretString
 import org.ergoplatform.wallet.interpreter.{ErgoProvingInterpreter, TransactionHintsBag}
 import org.ergoplatform.wallet.mnemonic.Mnemonic
-import org.ergoplatform.wallet.secrets.{DerivationPath, ExtendedSecretKey, JsonSecretStorage}
+import org.ergoplatform.wallet.secrets.JsonSecretStorage
 import org.ergoplatform.wallet.settings.SecretStorageSettings
 import org.ergoplatform.wallet.utils.FileUtils
-import scorex.util.encode.Base16
-import scorex.util.{ModifierId, bytesToId}
+import scorex.util.ModifierId
 import sigmastate.Values.SigmaBoolean
+import sigmastate.crypto.DLogProtocol.DLogProverInput
+import sigma.Extensions.CollBytesOps
 
 import java.io.FileNotFoundException
+import scala.collection.compat.immutable.ArraySeq
 import scala.util.{Failure, Success, Try}
 
 /**
@@ -66,13 +69,15 @@ trait ErgoWalletService {
     * @param mnemonic that was used to initialize wallet with
     * @param mnemonicPassOpt that was used to initialize wallet with
     * @param walletPass that was used to initialize wallet with
+    * @param usePre1627KeyDerivation - use incorrect(previous) BIP32 derivation, expected to be false for new wallets, and true for old pre-1627 wallets (see https://github.com/ergoplatform/ergo/issues/1627 for details)
     * @return new wallet state
     */
   def restoreWallet(state: ErgoWalletState,
                     settings: ErgoSettings,
                     mnemonic: SecretString,
                     mnemonicPassOpt: Option[SecretString],
-                    walletPass: SecretString): Try[ErgoWalletState]
+                    walletPass: SecretString, 
+                    usePre1627KeyDerivation: Boolean): Try[ErgoWalletState]
 
   /**
     * Decrypt underlying encrypted storage using `walletPass` and update public keys
@@ -109,12 +114,14 @@ trait ErgoWalletService {
   def getWalletBoxes(state: ErgoWalletState, unspentOnly: Boolean, considerUnconfirmed: Boolean): Seq[WalletBox]
 
   /**
-    * @param state current wallet state
-    * @param scanId to get boxes for
+    * @param state               current wallet state
+    * @param scanId              to get boxes for
     * @param considerUnconfirmed whether to look for boxes in off-chain registry
+    * @param minHeight           min inclusion height of unspent boxes
+    * @param maxHeight           max inclusion height of unspent boxes
     * @return Unspent wallet boxes corresponding to `scanId`
     */
-  def getScanUnspentBoxes(state: ErgoWalletState, scanId: ScanId, considerUnconfirmed: Boolean): Seq[WalletBox]
+  def getScanUnspentBoxes(state: ErgoWalletState, scanId: ScanId, considerUnconfirmed: Boolean, minHeight: Int, maxHeight: Int): Seq[WalletBox]
 
   /**
     * @param state current wallet state
@@ -155,6 +162,14 @@ trait ErgoWalletService {
     * @return Try of pay-to-public-key-address and new wallet state
     */
   def deriveKeyFromPath(state: ErgoWalletState, encodedPath: String, addrEncoder: ErgoAddressEncoder): Try[(P2PKAddress, ErgoWalletState)]
+
+  /**
+   * Get the secret key for a give derivation path.
+   * @param state current wallet state
+   * @param path derivation path from the master key
+   * @return Try of private key
+   */
+  def getPrivateKeyFromPath(state: ErgoWalletState, path: DerivationPath): Try[DLogProverInput]
 
   /**
     * Derive next key from master key
@@ -292,7 +307,7 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
     log.info("Initializing wallet")
 
     def initStorage(mnemonic: SecretString): Try[JsonSecretStorage] =
-      Try(JsonSecretStorage.init(Mnemonic.toSeed(mnemonic, mnemonicPassOpt), walletPass)(walletSettings.secretStorage))
+      Try(JsonSecretStorage.init(Mnemonic.toSeed(mnemonic, mnemonicPassOpt), walletPass, usePre1627KeyDerivation = false)(walletSettings.secretStorage))
 
     val result =
       new Mnemonic(walletSettings.mnemonicPhraseLanguage, walletSettings.seedStrengthBits)
@@ -316,11 +331,12 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
                     settings: ErgoSettings,
                     mnemonic: SecretString,
                     mnemonicPassOpt: Option[SecretString],
-                    walletPass: SecretString): Try[ErgoWalletState] =
+                    walletPass: SecretString,
+                    usePre1627KeyDerivation: Boolean): Try[ErgoWalletState] =
     if (settings.nodeSettings.isFullBlocksPruned)
       Failure(new IllegalArgumentException("Unable to restore wallet when pruning is enabled"))
     else
-      Try(JsonSecretStorage.restore(mnemonic, mnemonicPassOpt, walletPass, settings.walletSettings.secretStorage))
+      Try(JsonSecretStorage.restore(mnemonic, mnemonicPassOpt, walletPass, settings.walletSettings.secretStorage, usePre1627KeyDerivation))
         .flatMap { secretStorage =>
           // remove old wallet state, see https://github.com/ergoplatform/ergo/issues/1313
           recreateRegistry(state, settings).flatMap { stateV1 =>
@@ -402,16 +418,17 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
     boxes.map(tb => WalletBox(tb, currentHeight)).sortBy(_.trackedBox.inclusionHeightOpt)
   }
 
-  override def getScanUnspentBoxes(state: ErgoWalletState, scanId: ScanId, considerUnconfirmed: Boolean): Seq[WalletBox] = {
-    val unconfirmed = if (considerUnconfirmed) {
-      state.offChainRegistry.offChainBoxes.filter(_.scans.contains(scanId))
-    } else {
-      Seq.empty
-    }
+  override def getScanUnspentBoxes(state: ErgoWalletState, scanId: ScanId, considerUnconfirmed: Boolean, minHeight: Int, maxHeight: Int): Seq[WalletBox] = {
+    val unconfirmed: Seq[TrackedBox] =
+      if (considerUnconfirmed) {
+        state.offChainRegistry.offChainBoxes.filter(_.scans.contains(scanId))
+      } else {
+        ArraySeq.empty[TrackedBox]
+      }
 
     val currentHeight = state.fullHeight
-    val boxes = state.registry.unspentBoxes(scanId)  ++ unconfirmed
-    boxes.map(tb => WalletBox(tb, currentHeight)).sortBy(_.trackedBox.inclusionHeightOpt)
+    val unspentBoxes: Seq[TrackedBox] = state.registry.unspentBoxesByInclusionHeight(scanId, minHeight, maxHeight)
+    (unspentBoxes ++ unconfirmed).map(tb => WalletBox(tb, currentHeight)).sortBy(_.trackedBox.inclusionHeightOpt)
   }
 
   override def getScanSpentBoxes(state: ErgoWalletState, scanId: ScanId): Seq[WalletBox] = {
@@ -431,14 +448,18 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
     registry.getTx(txId)
       .map(tx => AugWalletTransaction(tx, fullHeight - tx.inclusionHeight))
 
-  override def collectBoxes(state: ErgoWalletState, boxSelector: BoxSelector, targetBalance: Long, targetAssets: Map[ErgoBox.TokenId, Long]): Try[CollectedBoxes] = {
-    val assetsMap = targetAssets.map(t => bytesToId(t._1) -> t._2)
+  override def collectBoxes(
+      state: ErgoWalletState,
+      boxSelector: BoxSelector,
+      targetBalance: Long,
+      targetAssets: Map[ErgoBox.TokenId, Long]): Try[CollectedBoxes] = {
+    val assetsMap = targetAssets.map(t => t._1.toModifierId -> t._2)
     val inputBoxes = state.getBoxesToSpend
     boxSelector
       .select(inputBoxes.iterator, state.walletFilter, targetBalance, assetsMap)
       .leftMap(m => new Exception(m.message))
       .map { res =>
-        val ergoBoxes = res.boxes.map(_.box)
+        val ergoBoxes = res.inputBoxes.map(_.box)
         val changeBoxes = res.changeBoxes.map(b => ChangeBox(b.value, b.tokens))
         CollectedBoxes(ergoBoxes, changeBoxes)
       }.toTry
@@ -539,6 +560,18 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
         Failure(new Exception("Unable to derive key from path, wallet is not initialized"))
     }
 
+  override def getPrivateKeyFromPath(state: ErgoWalletState, path: DerivationPath): Try[DLogProverInput] =
+    state.secretStorageOpt match {
+      case Some(secretStorage) if !secretStorage.isLocked =>
+        val rootSecret = secretStorage.secret.get // unlocked means Some(secret)
+        Success(rootSecret.derive(path.toPrivateBranch).privateInput)
+      case Some(_) =>
+        Failure(new Exception("Unable to derive key from path, wallet is locked"))
+      case None =>
+        Failure(new Exception("Unable to derive key from path, wallet is not initialized"))
+    }
+
+
   override def deriveNextKey(state: ErgoWalletState, usePreEip3Derivation: Boolean): Try[(DeriveNextKeyResult, ErgoWalletState)] =
     state.secretStorageOpt match {
       case Some(secretStorage) if !secretStorage.isLocked =>
@@ -551,8 +584,16 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
     }
 
   override def scanBlockUpdate(state: ErgoWalletState, block: ErgoFullBlock, dustLimit: Option[Long]): Try[ErgoWalletState] =
-      WalletScanLogic.scanBlockTransactions(state.registry, state.offChainRegistry, state.walletVars, block, state.outputsFilter, dustLimit)
-        .map { case (reg, offReg, updatedOutputsFilter) => state.copy(registry = reg, offChainRegistry = offReg, outputsFilter = Some(updatedOutputsFilter)) }
+      WalletScanLogic.scanBlockTransactions(
+        state.registry,
+        state.offChainRegistry,
+        state.walletVars,
+        block,
+        state.outputsFilter,
+        dustLimit,
+        ergoSettings.walletSettings.walletProfile).map { case (reg, offReg, updatedOutputsFilter) =>
+        state.copy(registry = reg, offChainRegistry = offReg, outputsFilter = Some(updatedOutputsFilter))
+      }
 
   override def updateUtxoState(state: ErgoWalletState): ErgoWalletState = {
     (state.mempoolReaderOpt, state.stateReaderOpt) match {
@@ -586,11 +627,11 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
   override def getUnconfirmedTransactions(state: ErgoWalletState, scanId: ScanId): Seq[AugWalletTransaction] = {
     state.mempoolReaderOpt.flatMap { mempool =>
       state.storage.getScan(scanId).map { scan =>
-        mempool.getAllPrioritized.filter { tx =>
-          tx.outputs.exists(scan.trackingRule.filter)
-        }.map { tx =>
+        mempool.getAllPrioritized.filter { unconfirmedTx =>
+          unconfirmedTx.transaction.outputs.exists(scan.trackingRule.filter)
+        }.map { unconfirmedTx =>
           // unconfirmed transaction has 0 confirmations
-          AugWalletTransaction(WalletTransaction(tx, state.fullHeight, Seq(scanId)), 0)
+          AugWalletTransaction(WalletTransaction(unconfirmedTx.transaction, state.fullHeight, Seq(scanId)), 0)
         }
       }
     }.getOrElse(Nil)
@@ -635,17 +676,5 @@ class ErgoWalletServiceImpl(override val ergoSettings: ErgoSettings) extends Erg
       .sign(tx, boxesToSpend.toIndexedSeq, dataBoxes.toIndexedSeq, stateContext, hints)
       .map(ErgoTransaction.apply)
   }
-
-}
-
-object ErgoWalletService {
-  /**
-    * Result of "deriveNextKey" operation
-    */
-  case class DeriveNextKeyResult(result: Try[(DerivationPath, P2PKAddress, ExtendedSecretKey)])
-
-  // A helper which is deserializing Base16-encoded boxes to ErgoBox instances
-  def stringsToBoxes(strings: Seq[String]): Seq[ErgoBox] =
-    strings.map(in => Base16.decode(in).flatMap(ErgoBoxSerializer.parseBytesTry)).map(_.get)
 
 }

@@ -11,8 +11,15 @@ import scorex.crypto.hash.{Blake2b256, Digest32}
 import scorex.db.{ByteArrayWrapper, LDBVersionedStore}
 
 import scala.collection.immutable.SortedMap
+import scala.math.Ordering.Implicits._
 
 object OOMTest extends App {
+
+  implicit val ordering: Ordering[Array[Byte]] =
+    new Ordering[Array[Byte]] {
+      override def compare(o1: Array[Byte], o2: Array[Byte]): Int =
+        implicitly[Ordering[Seq[Int]]].compare(o1.toSeq.map(_ & 0xFF), o2.toSeq.map(_ & 0xFF))
+    }
 
   type Box = (ADKey, ADValue)
 
@@ -23,8 +30,7 @@ object OOMTest extends App {
   val store = new LDBVersionedStore(dir, initialKeepVersions = 200)
 
   val bestVersionKey = Blake2b256("best state version")
-  private lazy val np = NodeParameters(keySize = 32, valueSize = None, labelSize = 32)
-  protected lazy val storage = new VersionedLDBAVLStorage(store, np)
+  protected lazy val storage = new VersionedLDBAVLStorage(store)
 
   val afterGenesisStateDigestHex: String = "78b130095239561ecf5449a7794c0615326d1fd007cc79dcc286e46e4beb1d3f01"
   val afterGenesisStateDigest: ADDigest = ADDigest @@ Base16.decode(afterGenesisStateDigestHex).get
@@ -67,7 +73,7 @@ object OOMTest extends App {
       Longs.toByteArray(value) ++ propBytes ++ (0.toByte +: Array.emptyByteArray) ++
         transactionId ++ Shorts.toByteArray(boxId)
     val id = Blake2b256.hash(bytes)
-    ADKey @@ id -> ADValue @@ bytes
+    ADKey @@@ id -> ADValue @@@ bytes
   }
 
   private def metadata(modId: Array[Byte], stateRoot: ADDigest): Seq[(Array[Byte], Array[Byte])] = {

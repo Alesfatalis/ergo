@@ -4,48 +4,51 @@ import akka.actor.ActorRef
 import org.ergoplatform.ErgoBox
 import org.ergoplatform.modifiers.history.header.Header
 import org.ergoplatform.modifiers.history.BlockTransactions
-import org.ergoplatform.modifiers.mempool.ErgoTransaction
-import org.ergoplatform.modifiers.{ErgoFullBlock, BlockSection}
+import org.ergoplatform.modifiers.mempool.{ErgoTransaction, UnconfirmedTransaction}
+import org.ergoplatform.modifiers.{BlockSection, ErgoFullBlock}
 import org.ergoplatform.network.{ErgoNodeViewSynchronizer, ErgoSyncTracker}
+import org.ergoplatform.nodeView.NodeViewSynchronizerTests
 import org.ergoplatform.nodeView.history.{ErgoHistory, ErgoSyncInfo, ErgoSyncInfoMessageSpec}
 import org.ergoplatform.nodeView.mempool.ErgoMemPool
 import org.ergoplatform.nodeView.state.{DigestState, ErgoState, UtxoState}
 import org.ergoplatform.sanity.ErgoSanity._
 import org.ergoplatform.settings.ErgoSettings
 import org.ergoplatform.settings.Constants.HashLength
-import org.ergoplatform.utils.{ErgoTestHelpers, HistoryTestHelpers}
-import org.scalacheck.Gen
-import scorex.core.network.DeliveryTracker
-import scorex.core.utils.NetworkTimeProvider
-import scorex.core.{PersistentNodeViewModifier, bytesToId}
-import scorex.crypto.authds.ADDigest
-import scorex.crypto.hash.{Blake2b256, Digest32}
 import scorex.testkit.generators.{ModifierProducerTemplateItem, SynInvalid, Valid}
-import scorex.testkit.properties._
+import scorex.testkit.properties.HistoryTests
 import scorex.testkit.properties.mempool.{MempoolRemovalTest, MempoolTransactionsTest}
 import scorex.testkit.properties.state.StateApplicationTest
+import org.ergoplatform.utils.ErgoTestHelpers
+import org.ergoplatform.core.bytesToId
+import org.scalacheck.Gen
+import scorex.core.network.DeliveryTracker
+import scorex.crypto.authds.ADDigest
+import scorex.crypto.hash.{Blake2b256, Digest32}
 import scorex.utils.Random
 
 import scala.concurrent.ExecutionContext
-import scala.concurrent.duration._
 
-trait ErgoSanity[ST <: ErgoState[ST]] extends HistoryTests
+trait ErgoSanity[ST <: ErgoState[ST]] extends NodeViewSynchronizerTests[ST]
   with StateApplicationTest[ST]
   with MempoolTransactionsTest
   with MempoolRemovalTest
-  with NodeViewSynchronizerTests[ST]
-  with ErgoTestHelpers
-  with HistoryTestHelpers {
-
+  with HistoryTests
+  with ErgoTestHelpers {
+  import org.ergoplatform.utils.ErgoCoreTestConstants._
+  import org.ergoplatform.utils.ErgoNodeTestConstants._
+  import org.ergoplatform.utils.generators.ErgoNodeGenerators._
+  import org.ergoplatform.utils.generators.ErgoCoreTransactionGenerators._
 
   override val memPool: MPool = ErgoMemPool.empty(settings)
 
   //Generators
   override lazy val transactionGenerator: Gen[ErgoTransaction] = invalidErgoTransactionGen
+  override lazy val unconfirmedTxGenerator: Gen[UnconfirmedTransaction] =
+    invalidErgoTransactionGen.map(tx => UnconfirmedTransaction(tx, None))
   override lazy val memPoolGenerator: Gen[MPool] = emptyMemPoolGen
 
   override def syntacticallyValidModifier(history: HT): Header = {
-    val bestTimestamp = history.bestHeaderOpt.map(_.timestamp + 1).getOrElse(timeProvider.time())
+    val bestTimestamp = history.bestHeaderOpt.map(_.timestamp + 1).getOrElse(System.currentTimeMillis())
 
     powScheme.prove(
       history.bestHeaderOpt,
@@ -54,7 +57,7 @@ trait ErgoSanity[ST <: ErgoState[ST]] extends HistoryTests
       ADDigest @@ Array.fill(HashLength + 1)(0.toByte),
       Digest32 @@ Array.fill(HashLength)(0.toByte),
       Digest32 @@ Array.fill(HashLength)(0.toByte),
-      Math.max(timeProvider.time(), bestTimestamp),
+      Math.max(System.currentTimeMillis(), bestTimestamp),
       Digest32 @@ Array.fill(HashLength)(0.toByte),
       Array.fill(3)(0: Byte),
       defaultMinerSecretNumber
@@ -90,7 +93,6 @@ trait ErgoSanity[ST <: ErgoState[ST]] extends HistoryTests
                         viewHolderRef: ActorRef,
                         syncInfoSpec: ErgoSyncInfoMessageSpec.type,
                         settings: ErgoSettings,
-                        timeProvider: NetworkTimeProvider,
                         syncTracker: ErgoSyncTracker,
                         deliveryTracker: DeliveryTracker)
                        (implicit ec: ExecutionContext) extends ErgoNodeViewSynchronizer(
@@ -98,20 +100,8 @@ trait ErgoSanity[ST <: ErgoState[ST]] extends HistoryTests
     viewHolderRef,
     syncInfoSpec,
     settings,
-    timeProvider,
     syncTracker,
-    deliveryTracker)(ec) {
-
-    override protected def broadcastInvForNewModifier(mod: PersistentNodeViewModifier): Unit = {
-      mod match {
-        case fb: ErgoFullBlock if fb.header.isNew(timeProvider, 1.hour) =>
-          fb.toSeq.foreach(s => broadcastModifierInv(s))
-        case h: Header if h.isNew(timeProvider, 1.hour) =>
-          broadcastModifierInv(h)
-        case _ =>
-      }
-    }
-  }
+    deliveryTracker)(ec)
 
 }
 

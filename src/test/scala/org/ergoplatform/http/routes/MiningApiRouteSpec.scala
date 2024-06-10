@@ -10,8 +10,8 @@ import org.ergoplatform.http.api.MiningApiRoute
 import org.ergoplatform.mining.AutolykosSolution
 import org.ergoplatform.settings.ErgoSettings
 import org.ergoplatform.utils.Stubs
-import org.ergoplatform.utils.generators.ErgoGenerators
-import org.ergoplatform.{Pay2SAddress, ErgoScriptPredef}
+import org.ergoplatform.utils.generators.ErgoCoreGenerators.genECPoint
+import org.ergoplatform.{ErgoTreePredef, Pay2SAddress}
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 
@@ -19,11 +19,13 @@ import scala.util.Try
 
 class MiningApiRouteSpec
   extends AnyFlatSpec
-    with ErgoGenerators
     with Matchers
     with ScalatestRouteTest
     with Stubs
     with FailFastCirceSupport {
+
+  import org.ergoplatform.utils.ErgoNodeTestConstants._
+  import org.ergoplatform.utils.generators.ErgoCoreGenerators._
 
   val prefix = "/mining"
 
@@ -48,7 +50,7 @@ class MiningApiRouteSpec
   it should "display miner pk" in {
     Get(prefix + "/rewardAddress") ~> route ~> check {
       status shouldBe StatusCodes.OK
-      val script = ErgoScriptPredef.rewardOutputScript(settings.chainSettings.monetary.minerRewardDelay, pk)
+      val script = ErgoTreePredef.rewardOutputScript(settings.chainSettings.monetary.minerRewardDelay, pk)
       val addressStr = Pay2SAddress(script)(settings.addressEncoder).toString()
       responseAs[Json].hcursor.downField("rewardAddress").as[String] shouldEqual Right(addressStr)
     }

@@ -1,10 +1,10 @@
 package org.ergoplatform.wallet.secrets
 
-import org.ergoplatform.wallet.Constants
-import org.ergoplatform.{ErgoAddressEncoder, P2PKAddress}
-import org.ergoplatform.wallet.mnemonic.Mnemonic
+import org.ergoplatform.sdk.wallet
+import org.ergoplatform.sdk.wallet.secrets.{DerivationPath, ExtendedSecretKey}
 import org.ergoplatform.wallet.interface4j.SecretString
-import org.ergoplatform.wallet.utils.Generators
+import org.ergoplatform.wallet.mnemonic.Mnemonic
+import org.ergoplatform.{ErgoAddressEncoder, P2PKAddress}
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.propspec.AnyPropSpec
 import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
@@ -12,8 +12,8 @@ import org.scalatestplus.scalacheck.ScalaCheckPropertyChecks
 class DerivationPathSpec
   extends AnyPropSpec
     with Matchers
-    with ScalaCheckPropertyChecks
-    with Generators {
+    with ScalaCheckPropertyChecks {
+  import org.ergoplatform.wallet.utils.WalletGenerators._
 
   property("derivation from encoded path") {
     forAll(derivationPathGen) { path =>
@@ -33,7 +33,7 @@ class DerivationPathSpec
 
     val seed = Mnemonic.toSeed(SecretString.create(mnemonic), None)
 
-    val masterKey = ExtendedSecretKey.deriveMasterKey(seed)
+    val masterKey = ExtendedSecretKey.deriveMasterKey(seed, usePre1627KeyDerivation = false)
     val dp = DerivationPath.nextPath(IndexedSeq(masterKey), usePreEip3Derivation = false).get
     val sk = masterKey.derive(dp)
     val pk = sk.publicKey.key
@@ -69,7 +69,7 @@ class DerivationPathSpec
 
     val seed = Mnemonic.toSeed(SecretString.create(mnemonic), None)
 
-    val masterKey = ExtendedSecretKey.deriveMasterKey(seed)
+    val masterKey = ExtendedSecretKey.deriveMasterKey(seed, usePre1627KeyDerivation = false)
     val dp = DerivationPath.nextPath(IndexedSeq(masterKey), usePreEip3Derivation = true).get
     val sk = masterKey.derive(dp)
     val pk = sk.publicKey.key
@@ -94,7 +94,7 @@ class DerivationPathSpec
 
   property("equality of old derivation") {
     // Check that hardcoded path from old codebase corresponds to the new string form (Constants.usePreEip3Derivation)
-    DerivationPath(Array(0, 1), publicBranch = false) shouldBe Constants.preEip3DerivationPath
+    DerivationPath(Array(0, 1), publicBranch = false) shouldBe wallet.Constants.preEip3DerivationPath
   }
 
   property("master key derivation") {
@@ -106,7 +106,7 @@ class DerivationPathSpec
 
     val seed = Mnemonic.toSeed(SecretString.create(mnemonic), None)
 
-    val masterKey = ExtendedSecretKey.deriveMasterKey(seed)
+    val masterKey = ExtendedSecretKey.deriveMasterKey(seed, usePre1627KeyDerivation = false)
     P2PKAddress(masterKey.publicKey.key).toString() shouldBe address
 
     masterKey.path shouldBe masterKeyDerivation
@@ -120,12 +120,12 @@ class DerivationPathSpec
   }
 
   property("isEip3 correctly distinguishing") {
-    Constants.eip3DerivationPath.isEip3 shouldBe true
-    Constants.eip3DerivationPath.toPublicBranch.isEip3 shouldBe true
+    wallet.Constants.eip3DerivationPath.isEip3 shouldBe true
+    wallet.Constants.eip3DerivationPath.toPublicBranch.isEip3 shouldBe true
     DerivationPath.fromEncoded("m/44'/429'/0'/0/1").get.isEip3 shouldBe true
     DerivationPath.fromEncoded("M/44'/429'/0'/0/1").get.isEip3 shouldBe true
     DerivationPath.fromEncoded("m/44'/429'/0'/1/1").get.isEip3 shouldBe true
-    Constants.preEip3DerivationPath.isEip3 shouldBe false
+    wallet.Constants.preEip3DerivationPath.isEip3 shouldBe false
     DerivationPath.fromEncoded("m/44'/429'/1'/0/1").get.isEip3 shouldBe false
   }
 

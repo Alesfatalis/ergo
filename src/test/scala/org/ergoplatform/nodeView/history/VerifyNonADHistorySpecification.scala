@@ -1,18 +1,21 @@
 package org.ergoplatform.nodeView.history
 
-import org.ergoplatform.modifiers.ErgoFullBlock
+import org.ergoplatform.consensus.ProgressInfo
+import org.ergoplatform.modifiers.{ErgoFullBlock, NetworkObjectTypeId}
 import org.ergoplatform.modifiers.history._
 import org.ergoplatform.modifiers.history.extension.Extension
 import org.ergoplatform.modifiers.history.header.HeaderSerializer
-import org.ergoplatform.nodeView.history.storage.modifierprocessors.{FullBlockProcessor, ToDownloadProcessor}
+import org.ergoplatform.nodeView.history.storage.modifierprocessors.FullBlockProcessor
 import org.ergoplatform.nodeView.state.StateType
 import org.ergoplatform.settings.Algos
-import org.ergoplatform.utils.HistoryTestHelpers
-import scorex.core.ModifierTypeId
-import scorex.core.consensus.ProgressInfo
+import org.ergoplatform.utils.{ErgoCorePropertyTest, MapPimp}
 
-class VerifyNonADHistorySpecification extends HistoryTestHelpers {
-  import ToDownloadProcessor._
+class VerifyNonADHistorySpecification extends ErgoCorePropertyTest {
+  import org.ergoplatform.utils.HistoryTestHelpers._
+  import org.ergoplatform.utils.ErgoNodeTestConstants._
+  import org.ergoplatform.utils.generators.ChainGenerator._
+  import org.ergoplatform.tools.MinerBench._
+  import org.ergoplatform.utils.generators.ValidBlocksGenerators._
 
   private def genHistory() =
     generateHistory(verifyTransactions = true, StateType.Utxo, PoPoWBootstrap = false, BlocksToKeep)
@@ -20,8 +23,8 @@ class VerifyNonADHistorySpecification extends HistoryTestHelpers {
   property("block sections application in incorrect order") {
     var history = genHistory()
     val chain = genChain(6, history)
-    if (!history.pruningProcessor.isHeadersChainSynced) {
-      history.pruningProcessor.updateBestFullBlock(chain.last.header)
+    if (!history.isHeadersChainSynced) {
+      history.updateBestFullBlock(chain.last.header)
     }
     history = applyHeaderChain(history, HeaderChain(chain.map(_.header)))
     chain.foreach(fb => history.append(fb.extension).get)
@@ -96,8 +99,8 @@ class VerifyNonADHistorySpecification extends HistoryTestHelpers {
     history.bestHeaderOpt.value shouldBe chain.last.header
     history.bestFullBlockOpt shouldBe None
 
-    if (!history.pruningProcessor.isHeadersChainSynced) {
-      history.pruningProcessor.updateBestFullBlock(chain.last.header)
+    if (!history.isHeadersChainSynced) {
+      history.updateBestFullBlock(chain.last.header)
     }
 
     // Until UTXO snapshot synchronization is implemented, we should always start to apply full blocks from genesis
@@ -118,7 +121,7 @@ class VerifyNonADHistorySpecification extends HistoryTestHelpers {
     val missedChain = chain.tail.toList
     val missedBS = missedChain.flatMap { fb =>
       Seq((BlockTransactions.modifierTypeId, fb.blockTransactions.encodedId), (Extension.modifierTypeId, fb.extension.encodedId))
-    }.foldLeft(Map.empty[ModifierTypeId, Seq[String]]) { case (newAcc, (mType, mId)) =>
+    }.foldLeft(Map.empty[NetworkObjectTypeId.Value, Seq[String]]) { case (newAcc, (mType, mId)) =>
       newAcc.adjust(mType)(_.fold(Seq(mId))(_ :+ mId))
     }
 
@@ -157,7 +160,7 @@ class VerifyNonADHistorySpecification extends HistoryTestHelpers {
   }
 
   property("append header to genesis - 2") {
-    val (us, bh) = createUtxoState(parameters)
+    val (us, bh) = createUtxoState(settings)
 
     val block = validFullBlock(None, us, bh)
 

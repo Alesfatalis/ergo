@@ -4,14 +4,14 @@ import akka.actor.{Actor, ActorRef, Cancellable, Props, SupervisorStrategy}
 import akka.io.Tcp
 import akka.io.Tcp._
 import akka.util.{ByteString, CompactByteString}
-import scorex.core.app.{ScorexContext, Version}
+import org.ergoplatform.network.{Handshake, HandshakeSerializer, PeerSpec, Version}
+import org.ergoplatform.network.Version.Eip37ForkVersion
+import scorex.core.app.ScorexContext
 import scorex.core.network.NetworkController.ReceivableMessages.{Handshaked, PenalizePeer}
 import scorex.core.network.PeerConnectionHandler.ReceivableMessages
-import scorex.core.network.PeerFeature.Serializers
-import scorex.core.network.message.{HandshakeSerializer, MessageSerializer}
-import scorex.core.network.peer.{PeerInfo, PenaltyType}
-import scorex.core.serialization.ScorexSerializer
-import scorex.core.settings.ScorexSettings
+import org.ergoplatform.network.message.MessageSerializer
+import org.ergoplatform.network.peer.{PeerInfo, PenaltyType}
+import org.ergoplatform.settings.ScorexSettings
 import scorex.util.ScorexLogging
 
 import scala.annotation.tailrec
@@ -35,10 +35,6 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
   private val ownSocketAddress = connectionDescription.ownSocketAddress
   private val localFeatures = connectionDescription.localFeatures
 
-  private val featureSerializers: Serializers =
-    localFeatures.map(f => f.featureId -> (f.serializer: ScorexSerializer[_ <: PeerFeature])).toMap
-
-  private val handshakeSerializer = new HandshakeSerializer(featureSerializers)
   private val messageSerializer = new MessageSerializer(scorexContext.messageSpecs, networkSettings.magicBytes)
 
   // there is no recovery for broken connections
@@ -67,21 +63,17 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
   override def postStop(): Unit = log.info(s"Peer handler to $connectionId destroyed")
 
   private def handshaking: Receive = {
-    handshakeTimeoutCancellableOpt = Some(context.system.scheduler.scheduleOnce(networkSettings.handshakeTimeout)
-    (self ! HandshakeTimeout))
-    val hb = handshakeSerializer.toBytes(createHandshakeMessage())
+    handshakeTimeoutCancellableOpt =
+      Some(context.system.scheduler.scheduleOnce(networkSettings.handshakeTimeout)(self ! HandshakeTimeout))
+    val hb = HandshakeSerializer.toBytes(createHandshakeMessage())
     connection ! Tcp.Write(ByteString(hb))
     log.info(s"Handshake sent to $connectionId")
 
     receiveAndHandleHandshake { receivedHandshake =>
       log.info(s"Got a Handshake from $connectionId")
 
-      val peerInfo = PeerInfo(
-        receivedHandshake.peerSpec,
-        scorexContext.timeProvider.time(),
-        Some(direction)
-      )
-      val peer = ConnectedPeer(connectionDescription.connectionId, self, 0, Some(peerInfo))
+      val peerInfo = PeerInfo(receivedHandshake.peerSpec, System.currentTimeMillis(), Some(direction))
+      val peer = ConnectedPeer(connectionDescription.connectionId, self, Some(peerInfo))
       selfPeer = Some(peer)
 
       networkControllerRef ! Handshaked(peerInfo)
@@ -91,17 +83,27 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
     } orElse handshakeTimeout orElse closeCommands
   }
 
+  //ban this peer for the wrong handshake message
+  //peer will be added to the blacklist and the network controller will send CloseConnection
+  private def banPeer(): Unit = {
+    selfPeer.foreach(c => networkControllerRef ! PenalizePeer(c.connectionId.remoteAddress, PenaltyType.PermanentPenalty))
+  }
+
   private def receiveAndHandleHandshake(handler: Handshake => Unit): Receive = {
     case Received(data) =>
-      handshakeSerializer.parseBytesTry(data.toArray) match {
+      HandshakeSerializer.parseBytesTry(data.toArray) match {
         case Success(handshake) =>
-          handler(handshake)
+          if (handshake.peerSpec.protocolVersion < Eip37ForkVersion) {
+            // peers not suporting EIP-37 hard-fork are stuck on another chain
+            log.info(s"Peer of version < 4.0.100 sent handshake $handshake")
+            banPeer()
+          } else {
+            handler(handshake)
+          }
 
         case Failure(t) =>
-          log.info(s"Error during parsing a handshake", t)
-          //ban the peer for the wrong handshake message
-          //peer will be added to the blacklist and the network controller will send CloseConnection
-          selfPeer.foreach(c => networkControllerRef ! PenalizePeer(c.connectionId.remoteAddress, PenaltyType.PermanentPenalty))
+          log.info(s"Error during parsing a handshake: ${t.getMessage}", t)
+          banPeer()
       }
   }
 
@@ -145,7 +147,7 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
   }
 
   def localInterfaceWriting: Receive = {
-    case msg: message.Message[_] =>
+    case msg: org.ergoplatform.network.message.Message[_] =>
       log.info("Send message " + msg.spec + " to " + connectionId)
       outMessagesCounter += 1
       connection ! Write(messageSerializer.serialize(msg), ReceivableMessages.Ack(outMessagesCounter))
@@ -163,7 +165,7 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
 
   // operate in ACK mode until all buffered messages are transmitted
   def localInterfaceBuffering: Receive = {
-    case msg: message.Message[_] =>
+    case msg: org.ergoplatform.network.message.Message[_] =>
       outMessagesCounter += 1
       buffer(outMessagesCounter, messageSerializer.serialize(msg))
 
@@ -240,7 +242,7 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
     }
   }
 
-  private def createHandshakeMessage() = {
+  private def createHandshakeMessage(): Handshake = {
     Handshake(
       PeerSpec(
         networkSettings.agentName,
@@ -249,7 +251,7 @@ class PeerConnectionHandler(scorexSettings: ScorexSettings,
         ownSocketAddress,
         localFeatures
       ),
-      scorexContext.timeProvider.time()
+      System.currentTimeMillis()
     )
   }
 

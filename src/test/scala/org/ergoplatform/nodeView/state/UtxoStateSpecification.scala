@@ -1,7 +1,6 @@
 package org.ergoplatform.nodeView.state
 
 import java.util.concurrent.Executors
-
 import org.ergoplatform.ErgoBox.{BoxId, R4}
 import org.ergoplatform._
 import org.ergoplatform.mining._
@@ -10,18 +9,19 @@ import org.ergoplatform.modifiers.history.extension.Extension
 import org.ergoplatform.modifiers.history.header.Header
 import org.ergoplatform.modifiers.history.{ADProofs, BlockTransactions}
 import org.ergoplatform.modifiers.mempool.{ErgoTransaction, UnsignedErgoTransaction}
-import org.ergoplatform.nodeView.history.ErgoHistory
+import org.ergoplatform.nodeView.history.ErgoHistoryUtils._
+import org.ergoplatform.modifiers.transaction.TooHighCostError
+import org.ergoplatform.core.idToVersion
 import org.ergoplatform.nodeView.state.wrapped.WrappedUtxoState
 import org.ergoplatform.settings.Constants
-import org.ergoplatform.utils.{ErgoPropertyTest, RandomWrapper}
-import org.ergoplatform.utils.generators.ErgoTransactionGenerators
-import scorex.core._
-import scorex.core.transaction.state.TransactionValidation.TooHighCostError
+import org.ergoplatform.utils.{ErgoCorePropertyTest, RandomWrapper}
+import org.scalatest.OptionValues
 import scorex.crypto.authds.ADKey
 import scorex.db.ByteArrayWrapper
+import scorex.util.{ModifierId, bytesToId}
 import scorex.util.encode.Base16
 import sigmastate.Values.ByteArrayConstant
-import sigmastate.basics.DLogProtocol.{DLogProverInput, ProveDlog}
+import sigmastate.crypto.DLogProtocol.{DLogProverInput, ProveDlog}
 import sigmastate.interpreter.ProverResult
 import sigmastate.helpers.TestingHelpers._
 
@@ -29,11 +29,18 @@ import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, ExecutionContext, ExecutionContextExecutor, Future}
 import scala.util.Try
 
+class UtxoStateSpecification extends ErgoCorePropertyTest with OptionValues {
+  import org.ergoplatform.utils.ErgoNodeTestConstants._
+  import org.ergoplatform.utils.ErgoCoreTestConstants._
+  import org.ergoplatform.utils.generators.ErgoNodeTransactionGenerators._
+  import org.ergoplatform.utils.generators.ErgoCoreTransactionGenerators._
+  import org.ergoplatform.utils.generators.ErgoCoreGenerators._
+  import org.ergoplatform.utils.generators.ValidBlocksGenerators._
 
-class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenerators {
+  private val emptyModifierId: ModifierId = bytesToId(Array.fill(32)(0.toByte))
 
   property("Founders box workflow") {
-    var (us, bh) = createUtxoState(parameters)
+    var (us, bh) = createUtxoState(settings)
     var foundersBox = genesisBoxes.last
     var lastBlock = validFullBlock(parentOpt = None, us, bh)
     us = us.applyModifier(lastBlock, None)(_ => ()).get
@@ -49,7 +56,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val unsignedTx = new UnsignedErgoTransaction(inputs, IndexedSeq(), newBoxes)
       val tx: ErgoTransaction = ErgoTransaction(defaultProver.sign(unsignedTx, IndexedSeq(foundersBox), emptyDataBoxes, us.stateContext).get)
       val txCostLimit     = initSettings.nodeSettings.maxTransactionCost
-      us.validateWithCost(tx, None, txCostLimit, None).get should be <= 100000
+      us.validateWithCost(tx, us.stateContext.simplifiedUpcoming(), txCostLimit, None).get should be <= 100000
       val block1 = validFullBlock(Some(lastBlock), us, Seq(ErgoTransaction(tx)))
       us = us.applyModifier(block1, None)(_ => ()).get
       foundersBox = tx.outputs.head
@@ -58,9 +65,9 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
   }
 
   property("Founders should be able to spend genesis founders box") {
-    var (us, bh) = createUtxoState(parameters)
+    var (us, bh) = createUtxoState(settings)
     val foundersBox = genesisBoxes.last
-    var height: Int = ErgoHistory.GenesisHeight
+    var height: Int = GenesisHeight
 
     val settingsPks = settings.chainSettings.foundersPubkeys
       .map(str => groupElemFromBytes(Base16.decode(str).get))
@@ -91,25 +98,26 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
         testBox(foundersBox.value - remaining, rewardPk, height, Seq())
       )
       val unsignedTx = new UnsignedErgoTransaction(inputs, IndexedSeq(), newBoxes)
-      val tx = defaultProver.sign(unsignedTx, IndexedSeq(foundersBox), emptyDataBoxes, us.stateContext).get
-      val validationRes1 = us.validateWithCost(ErgoTransaction(tx), 100000)
+      val tx = ErgoTransaction(defaultProver.sign(unsignedTx, IndexedSeq(foundersBox), emptyDataBoxes, us.stateContext).get)
+      val validationContext = us.stateContext.simplifiedUpcoming()
+      val validationRes1 = us.validateWithCost(tx, validationContext, 100000, None)
       validationRes1 shouldBe 'success
       val txCost = validationRes1.get
 
-      val validationRes2 = us.validateWithCost(ErgoTransaction(tx), txCost - 1)
+      val validationRes2 = us.validateWithCost(tx, validationContext, txCost - 1, None)
       validationRes2 shouldBe 'failure
       validationRes2.toEither.left.get.isInstanceOf[TooHighCostError] shouldBe true
 
-      us.validateWithCost(ErgoTransaction(tx), txCost + 1) shouldBe 'success
+      us.validateWithCost(tx, validationContext, txCost + 1, None) shouldBe 'success
 
-      us.validateWithCost(ErgoTransaction(tx), txCost) shouldBe 'success
+      us.validateWithCost(tx, validationContext, txCost, None) shouldBe 'success
 
       height = height + 1
     }
   }
 
   property("Correct genesis state") {
-    val (us, bh) = createUtxoState(parameters)
+    val (us, bh) = createUtxoState(settings)
     val boxes = bh.boxes.values.toList
     boxes.size shouldBe 3
 
@@ -133,7 +141,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
   }
 
   property("extractEmissionBox() should extract correct box") {
-    var (us, bh) = createUtxoState(parameters)
+    var (us, bh) = createUtxoState(settings)
     us.emissionBoxOpt should not be None
     var lastBlockOpt: Option[ErgoFullBlock] = None
     forAll { seed: Int =>
@@ -156,8 +164,8 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
   }
 
   property("proofsForTransactions") {
-    var (us: UtxoState, bh) = createUtxoState(parameters)
-    var height: Int = ErgoHistory.GenesisHeight
+    var (us: UtxoState, bh) = createUtxoState(settings)
+    var height: Int = GenesisHeight
     forAll(defaultHeaderGen) { header =>
       val t = validTransactionsFromBoxHolder(bh, new RandomWrapper(Some(height)))
       val txs = t._1
@@ -181,10 +189,10 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
     var bh = BoxHolder(Seq(genesisEmissionBox))
     var us = createUtxoState(bh, parameters)
 
-    var height: Int = ErgoHistory.GenesisHeight
+    var height: Int = GenesisHeight
     // generate chain of correct full blocks
     val chain = (0 until 10) map { _ =>
-      val header = defaultHeaderGen.sample.value
+      val header: Header = defaultHeaderGen.sample.value
       val t = validTransactionsFromBoxHolder(bh, new RandomWrapper(Some(height)))
       val txs = t._1
       bh = t._2
@@ -248,7 +256,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val incorrectTransactions = IndexedSeq(txWithMissedDataInputs)
       // proof for transaction works correctly, providing proof-of-non-existence for missed input
       val digest2 = us.proofsForTransactions(incorrectTransactions).get._2
-      us.applyTransactions(incorrectTransactions, digest2, emptyStateContext) shouldBe 'failure
+      us.applyTransactions(incorrectTransactions, emptyModifierId, digest2, emptyStateContext) shouldBe 'failure
 
       // trying to apply transactions with correct data inputs
       val existingDataInputs = existingBoxes.map(DataInput).toIndexedSeq
@@ -256,7 +264,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val txWithDataInputs = ErgoTransaction(headTx.inputs, existingDataInputs, headTx.outputCandidates)
       val correctTransactions = IndexedSeq(txWithDataInputs)
       val digest = us.proofsForTransactions(correctTransactions).get._2
-      us.applyTransactions(correctTransactions, digest, emptyStateContext).get
+      us.applyTransactions(correctTransactions, emptyModifierId, digest, emptyStateContext).get
     }
   }
 
@@ -293,17 +301,17 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
 
       val txs3 = IndexedSeq(headTx, nextTx, txWithDataInputs2)
       val (_, digest3) = us.proofsForTransactions(txs3).get
-      us.applyTransactions(txs3, digest3, emptyStateContext) shouldBe 'success
+      us.applyTransactions(txs3, emptyModifierId, digest3, emptyStateContext) shouldBe 'success
       us.rollbackTo(version)
 
       val txs4 = IndexedSeq(headTx, txWithDataInputs2, nextTx)
       val (_, digest4) = us.proofsForTransactions(txs4).get
-      us.applyTransactions(txs4, digest4, emptyStateContext) shouldBe 'success
+      us.applyTransactions(txs4, emptyModifierId, digest4, emptyStateContext) shouldBe 'success
       us.rollbackTo(version)
 
       val txs5 = IndexedSeq(txWithDataInputs2, headTx, nextTx)
       us.proofsForTransactions(txs5) shouldBe 'failure
-      us.applyTransactions(txs5, digest4, emptyStateContext) shouldBe 'failure
+      us.applyTransactions(txs5, emptyModifierId, digest4, emptyStateContext) shouldBe 'failure
       us.rollbackTo(version)
 
       // trying to apply transactions with data inputs same as outputs of the previous tx
@@ -313,7 +321,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val txsNext = IndexedSeq(headTx, nextTxWithDataInputs)
       // proof of non-existence
       val d2 = us.proofsForTransactions(txsNext).get._2
-      us.applyTransactions(txsNext, d2, emptyStateContext) shouldBe 'success
+      us.applyTransactions(txsNext, emptyModifierId, d2, emptyStateContext) shouldBe 'success
     }
   }
 
@@ -333,7 +341,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val wBlock = invalidErgoFullBlockGen.sample.get
       val block = wBlock.copy(header = wBlock.header.copy(height = 1))
       val newSC = us.stateContext.appendFullBlock(block).get
-      us.applyTransactions(txs, digest, newSC).get
+      us.applyTransactions(txs, emptyModifierId, digest, newSC).get
     }
   }
 
@@ -358,7 +366,7 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
       val bt = new BlockTransactions(header.id, 1: Byte, txs)
       val fb = new ErgoFullBlock(header, bt, genExtension(header, us.stateContext), None)
       val newSC = us.stateContext.appendFullBlock(fb).get
-      us.applyTransactions(txs, digest, newSC).get
+      us.applyTransactions(txs, emptyModifierId, digest, newSC).get
     }
   }
 
@@ -433,13 +441,13 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
 
   property("applyModifier() - invalid block") {
     forAll(invalidErgoFullBlockGen) { b =>
-      val state = createUtxoState(parameters)._1
+      val state = createUtxoState(settings)._1
       state.applyModifier(b, None)(_ => ()).isFailure shouldBe true
     }
   }
 
   property("applyModifier() - valid full block after invalid one") {
-    val (us, bh) = createUtxoState(parameters)
+    val (us, bh) = createUtxoState(settings)
     val validBlock = validFullBlock(parentOpt = None, us, bh)
 
     //Different state
@@ -458,20 +466,20 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
 
 
   property("2 forks switching") {
-    val (us, bh) = createUtxoState(parameters)
+    val (us, bh) = createUtxoState(settings)
     val genesis = validFullBlock(parentOpt = None, us, bh)
-    val wusAfterGenesis = WrappedUtxoState(us, bh, stateConstants, parameters).applyModifier(genesis)(_ => ()).get
+    val wusAfterGenesis = WrappedUtxoState(us, bh, settings, parameters).applyModifier(genesis)(_ => ()).get
     val chain1block1 = validFullBlock(Some(genesis), wusAfterGenesis)
     val wusChain1Block1 = wusAfterGenesis.applyModifier(chain1block1)(_ => ()).get
     val chain1block2 = validFullBlock(Some(chain1block1), wusChain1Block1)
 
-    val (us2, bh2) = createUtxoState(parameters)
-    val wus2AfterGenesis = WrappedUtxoState(us2, bh2, stateConstants, parameters).applyModifier(genesis)(_ => ()).get
+    val (us2, bh2) = createUtxoState(settings)
+    val wus2AfterGenesis = WrappedUtxoState(us2, bh2, settings, parameters).applyModifier(genesis)(_ => ()).get
     val chain2block1 = validFullBlock(Some(genesis), wus2AfterGenesis)
     val wusChain2Block1 = wus2AfterGenesis.applyModifier(chain2block1)(_ => ()).get
     val chain2block2 = validFullBlock(Some(chain2block1), wusChain2Block1)
 
-    var (state, _) = createUtxoState(parameters)
+    var (state, _) = createUtxoState(settings)
     state = state.applyModifier(genesis, None)(_ => ()).get
 
     state = state.applyModifier(chain1block1, None)(_ => ()).get
@@ -492,8 +500,8 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
         val us = createUtxoState(bh, parameters)
         bh.sortedBoxes.foreach(box => us.boxById(box.id) should not be None)
         val genesis = validFullBlock(parentOpt = None, us, bh)
-        val wusAfterGenesis = WrappedUtxoState(us, bh, stateConstants, parameters).applyModifier(genesis)(_ => ()).get
-        wusAfterGenesis.rootHash shouldEqual genesis.header.stateRoot
+        val wusAfterGenesis = WrappedUtxoState(us, bh, settings, parameters).applyModifier(genesis)(_ => ()).get
+        wusAfterGenesis.rootDigest shouldEqual genesis.header.stateRoot
 
         val (finalState: WrappedUtxoState, chain: Seq[ErgoFullBlock]) = (0 until depth)
           .foldLeft((wusAfterGenesis, Seq(genesis))) { (sb, _) =>
@@ -501,17 +509,17 @@ class UtxoStateSpecification extends ErgoPropertyTest with ErgoTransactionGenera
             val block = validFullBlock(parentOpt = Some(sb._2.last), state)
             (state.applyModifier(block)(_ => ()).get, sb._2 ++ Seq(block))
           }
-        val finalRoot = finalState.rootHash
+        val finalRoot = finalState.rootDigest
         finalRoot shouldEqual chain.last.header.stateRoot
 
         val rollbackedState = finalState.rollbackTo(idToVersion(genesis.id)).get
-        rollbackedState.rootHash shouldEqual genesis.header.stateRoot
+        rollbackedState.rootDigest shouldEqual genesis.header.stateRoot
 
         val finalState2: WrappedUtxoState = chain.tail.foldLeft(rollbackedState) { (state, block) =>
           state.applyModifier(block)(_ => ()).get
         }
 
-        finalState2.rootHash shouldEqual finalRoot
+        finalState2.rootDigest shouldEqual finalRoot
       }
     }
   }
